@@ -15,11 +15,16 @@ import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
+/**
+ * Recebe as requisições HTTP da interface web e delega o fechamento à fachada.
+ * A resposta JSON leva o resultado da venda e o cardápio atualizado.
+ */
 public final class ApiPedidos {
     private static final int LIMITE_CORPO = 1024;
     private static final String FORMULARIO = "application/x-www-form-urlencoded";
 
     private final PedidoFacade fachada;
+    // Guarda vendas aprovadas por identificador de tentativa enquanto a API estiver rodando.
     private final Map<UUID, Venda> vendas = new HashMap<>();
 
     private ApiPedidos(PedidoFacade fachada) {
@@ -30,14 +35,16 @@ public final class ApiPedidos {
         int porta = args.length == 0 ? 8080 : Integer.parseInt(args[0]);
         HttpServer servidor = HttpServer.create(new InetSocketAddress("127.0.0.1", porta), 0);
         ApiPedidos api = new ApiPedidos(Configuracao.criarFachada());
+        // api::atender indica o método chamado pelo servidor para os caminhos sob /api/.
         servidor.createContext("/api/", api::atender);
-        // Trata consulta, validação e baixa em sequência para compartilhar o estoque com segurança.
+        // Uma requisição por vez impede que outra venda intervenha entre a conferência e a baixa.
         servidor.setExecutor(Executors.newSingleThreadExecutor());
         servidor.start();
         System.out.printf("API da lanchonete em http://127.0.0.1:%d/api/cardapio%n", servidor.getAddress().getPort());
     }
 
     private void atender(HttpExchange troca) throws IOException {
+        // Fecha a troca HTTP ao final, inclusive se ocorrer uma exceção.
         try (troca) {
             switch (troca.getRequestURI().getPath()) {
                 case "/api/cardapio" -> {
@@ -62,6 +69,7 @@ public final class ApiPedidos {
             return;
         }
 
+        // O byte extra permite detectar um corpo que ultrapassa o limite.
         byte[] corpo = troca.getRequestBody().readNBytes(LIMITE_CORPO + 1);
         if (corpo.length > LIMITE_CORPO) {
             erro(troca, 413, "Pedido maior que o limite permitido.");
@@ -76,6 +84,7 @@ public final class ApiPedidos {
             return;
         }
 
+        // Ao repetir uma venda aprovada com os mesmos dados, reutiliza o resultado sem dar outra baixa.
         Venda venda = vendas.get(solicitacao.tentativa());
         if (venda != null && !venda.solicitacao().equals(solicitacao)) {
             erro(troca, 409, "Este identificador já foi usado em outro pedido.");
@@ -84,6 +93,7 @@ public final class ApiPedidos {
 
         ResultadoPedido resultado;
         if (venda == null) {
+            // Converte as quantidades recebidas em um Pedido e entrega a venda à fachada.
             Pedido pedido = new Pedido(solicitacao.quantidades());
             resultado = fachada.finalizarPedido(pedido, solicitacao.pagamento());
             if (resultado.aprovado()) {
@@ -93,11 +103,13 @@ public final class ApiPedidos {
             resultado = venda.resultado();
         }
 
+        // O status 200 indica que a API processou a solicitação. O campo aprovado informa se houve venda.
         enviar(troca, 200, """
                 {"aprovado":%s,"mensagem":%s,"produtos":%s}"""
                 .formatted(resultado.aprovado(), textoJson(resultado.mensagem()), cardapio()));
     }
 
+    // Separa o identificador e o pagamento. Os campos restantes são códigos de produto e quantidades.
     private static Solicitacao lerFormulario(String corpo) {
         Map<String, String> campos = new HashMap<>();
         for (String par : corpo.split("&", -1)) {
